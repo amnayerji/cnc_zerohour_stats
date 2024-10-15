@@ -1,0 +1,57 @@
+[tool.black]
+# Default black configuration
+line-length = 99
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+# Black compatible isort configuration
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+combine_as_imports = true
+line_length = 99
+
+[tool.poetry]
+name = "cnc_zh_stats"
+version = "0.1.0"
+description = "A django project to manage Command And Conquer Generals Zero Hour stats"
+authors = ["Andrew Mneyergi <amnayerji@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+beautifulsoup4 = "==4.12.3"
+dj-database-url = "==2.1.0"
+django = "==5.0.6"
+django-autocomplete-light = "==3.11.0"
+django-jazzmin = "==3.0.0"
+gunicorn = "==22.0.0"
+psycopg2-binary = "==2.9.9"
+pygments = "==2.18.0"
+python = "^3.12"
+python-dateutil = "==2.9.0.post0"
+whitenoise = "==6.6.0"
+
+[tool.poetry.group.dev.dependencies]
+black = "==24.4.2"
+flake8 = "==5.0.4"
+flake8-bugbear = "==22.12.6"
+isort = "==5.13.2"
+pylint = "==2.17.7"
+pylint-django = "==2.5.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

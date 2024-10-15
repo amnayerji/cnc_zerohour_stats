@@ -1,0 +1,42 @@
+services:
+  app:
+    build:
+      context: .
+    volumes:
+      - ./:/app
+    ports:
+      - 8000
+    depends_on:
+      http-proxy:
+        condition: service_started
+      postgres:
+        condition: service_started
+    environment:
+      PORT: 8000
+      DEBUG: "true"
+      ENVIRONMENT: dev
+      DATABASE_URL: postgres://postgres@postgres:5432/cnc_zh_stats
+      GUNICORN_WORKERS: 2
+      VIRTUAL_HOST: zhstats.docker
+
+  postgres:
+    image: postgres:16
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_DB: "cnc_zh_stats"
+      POSTGRES_HOST_AUTH_METHOD: trust
+      VIRTUAL_HOST: postgres.docker
+
+  http-proxy:
+    container_name: http-proxy
+    image: codekitchen/dinghy-http-proxy
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+    ports:
+      - "80:80"
+      - "443:443"
+      - "19322:19322/udp"
+    environment:
+      - CONTAINER_NAME=http-proxy
+      - DNS_IP=127.0.0.1
