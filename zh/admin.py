@@ -25,6 +25,16 @@ class ReadOnlyMixin:
         return True
 
 
+def custom_titled_filter(title):
+    class Wrapper(admin.FieldListFilter):
+        def __new__(cls, *args, **kwargs):
+            instance = admin.FieldListFilter.create(*args, **kwargs)
+            instance.title = title
+            return instance
+
+    return Wrapper
+
+
 class BaseModelAdmin(ModelAdmin):
     readonly_fields = ("id", "created_at", "modified_at")
 
@@ -32,7 +42,7 @@ class BaseModelAdmin(ModelAdmin):
 @admin.register(JobRun)
 class JobRunAdmin(ReadOnlyMixin, BaseModelAdmin):
     list_display = ("id", "start_time", "duration", "success")
-    list_filter = ("success",)
+    list_filter = (("success", custom_titled_filter("Completed successfully")),)
     search_fields = ("id", "last_loaded_month", "last_loaded_date")
     date_hierarchy = "start_time"
     fieldsets = (
@@ -87,12 +97,20 @@ class MatchPlayerInline(ReadOnlyMixin, TabularInline):
 
 @admin.register(Match)
 class MatchAdmin(ReadOnlyMixin, BaseModelAdmin):
-    list_display = ("id", "match_datetime", "match_type", "map", "starting_cash", "match_length")
+    list_display = (
+        "id",
+        "match_datetime",
+        "replay_uploaded_by",
+        "match_type",
+        "map",
+        "starting_cash",
+        "match_length",
+    )
     list_filter = (
         "game_version",
         "match_type",
-        "players__player__player_name",
-        "replay_uploaded_by__player_name",
+        ("players__player__player_name", custom_titled_filter("participating player")),
+        ("replay_uploaded_by__player_name", custom_titled_filter("uploaded by")),
         "players__army",
     )
     search_fields = (

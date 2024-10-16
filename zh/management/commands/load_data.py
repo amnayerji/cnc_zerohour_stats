@@ -22,8 +22,8 @@ def update_run_status(job_run, start_time, loaded_matches):
     job_run.duration = datetime.timedelta(seconds=int(time.time() - start_time))
     job_run.loaded_matches = loaded_matches
     job_run.logs.extend(LOGS)
-    LOGS.clear()
     job_run.save()
+    LOGS.clear()
 
 
 class GenToolClient:
@@ -51,7 +51,7 @@ class GenToolClient:
             "starting_cash": r"Start Cash:\s+(\d+)",
             "match_length": r"Match Length:\s+([\d:]+)",
             "match_type": r"Match Type:\s+(.+)",
-            "match_date": r"Match Date \(UTC\):\s+(.+)",
+            "match_datetime": r"Match Date \(UTC\):\s+(.+)",
             "replay_size": r"\.rep \[(\d+) bytes\]",
         }
 
@@ -60,11 +60,13 @@ class GenToolClient:
             match = re.search(pattern, data)
             value = match.group(1) if match else None
 
-            if key == "match_date" and value:
+            if key == "match_datetime" and value:
                 try:
-                    value = datetime.strptime(value, "%Y %b %d, %H:%M:%S")
+                    value = datetime.datetime.strptime(value, "%Y %b %d, %H:%M:%S").astimezone(
+                        datetime.timezone.utc
+                    )
                 except ValueError as e:
-                    print(f"Error parsing date: {e}")
+                    log(f"Error parsing date: {e}")
                     value = None
             if key == "game_version" and not value:
                 value = "Unknown"
@@ -147,11 +149,15 @@ class Command(BaseCommand):
             min_month = previous_run.last_loaded_month
             min_day = previous_run.last_loaded_date
         else:
-            min_month = None
+            min_month = "2024_08_August"
             min_day = None
 
         current_run = JobRun.objects.create(
-            start_time=timezone.now(), duration=None, success=False
+            start_time=timezone.now(),
+            duration=None,
+            success=False,
+            last_loaded_month=min_month,
+            last_loaded_date=min_day,
         )
 
         try:
@@ -185,41 +191,43 @@ class Command(BaseCommand):
                                 ".txt", ".rep"
                             )
 
-                            if not Match.objects.filter(replay_url=replay_url).exists():
-                                match = Match.objects.create(
-                                    job_run=current_run,
-                                    replay_url=replay_url,
-                                    **match_data,
-                                    replay_uploaded_by=player,
+                            if Match.objects.filter(replay_url=replay_url).exists():
+                                continue
+                            match = Match.objects.create(
+                                job_run=current_run,
+                                replay_url=replay_url,
+                                **match_data,
+                                replay_uploaded_by=player,
+                            )
+                            log(f"Created match: {replay_url}")
+
+                            match_player_objects = []
+                            for match_player in match_players:
+                                if match_player["player_name"] == player.player_name:
+                                    player_object = player
+                                else:
+                                    player_object, created_object = (
+                                        Player.objects.get_or_create(  # NOQA E501
+                                            player_name=match_player["player_name"]
+                                        )
+                                    )
+                                    if created_object:
+                                        log(f"Created player: {match_player['player_name']}")
+                                match_player_objects.append(
+                                    MatchPlayer(
+                                        match=match,
+                                        player=player_object,
+                                        team=match_player["team"],
+                                        army=match_player["army"],
+                                    )
+                                )
+                                log(
+                                    f"Adding player: {match_player['player_name']} to match: {replay_url}"  # NOQA E501
                                 )
 
-                                match_player_objects = []
-                                for match_player in match_players:
-                                    if match_player["player_name"] == player.player_name:
-                                        player_object = player
-                                    else:
-                                        player_object, created_object = (
-                                            Player.objects.get_or_create(  # NOQA E501
-                                                name=match_player["player_name"]
-                                            )
-                                        )
-                                        if created_object:
-                                            log(f"Created player: {match_player['player_name']}")
-                                    match_player_objects.append(
-                                        MatchPlayer(
-                                            match=match,
-                                            player=player_object,
-                                            team=match_player["team"],
-                                            army=match_player["army"],
-                                        )
-                                    )
-                                    log(
-                                        f"Added player: {match_player['name']} to match: {replay_url}"  # NOQA E501
-                                    )
-
-                                MatchPlayer.objects.bulk_create(match_player_objects)
-                                loaded_matches += 1
-                    update_run_status(current_run, start_time, loaded_matches)
+                            MatchPlayer.objects.bulk_create(match_player_objects)
+                            loaded_matches += 1
+                        update_run_status(current_run, start_time, loaded_matches)
             current_run.success = True
         except Exception as e:
             current_run.success = False
