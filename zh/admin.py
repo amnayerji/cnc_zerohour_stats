@@ -99,7 +99,8 @@ class MatchPlayerInline(ReadOnlyMixin, TabularInline):
 class MatchAdmin(ReadOnlyMixin, BaseModelAdmin):
     list_display = (
         "id",
-        "match_datetime",
+        "match_timestamp",
+        "replay_upload_timestamp",
         "replay_uploaded_by",
         "match_type",
         "map",
@@ -121,5 +122,5 @@ class MatchAdmin(ReadOnlyMixin, BaseModelAdmin):
         "replay_uploaded_by__player_name",
         "players__army",
     )
-    date_hierarchy = "match_datetime"
+    date_hierarchy = "match_timestamp"
     inlines = (MatchPlayerInline,)

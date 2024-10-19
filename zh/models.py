@@ -24,8 +24,6 @@ class JobRun(BaseModel):
     loaded_matches = models.IntegerField(default=0)
     logs = ArrayField(models.TextField(), default=list, blank=True)
     success = models.BooleanField(default=False)
-    last_loaded_month = models.CharField(max_length=30, null=True, blank=True)
-    last_loaded_date = models.CharField(max_length=30, null=True, blank=True)
 
     class Meta:
         ordering = ("-start_time",)
@@ -54,11 +52,12 @@ class Match(BaseModel):
     starting_cash = models.IntegerField()
     match_length = models.DurationField()
     match_type = models.CharField(max_length=20)
-    match_datetime = models.DateTimeField()
+    match_timestamp = models.DateTimeField()
     replay_size = models.IntegerField(help_text="Size of the replay file in KB")
     replay_uploaded_by = models.ForeignKey(
         to=Player, on_delete=models.CASCADE, related_name="uploaded_matches"
     )
+    replay_upload_timestamp = models.DateTimeField(null=True)
 
     class Meta:
         ordering = ("-created_at",)

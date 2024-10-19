@@ -4,7 +4,9 @@ import time
 
 import requests
 from bs4 import BeautifulSoup
+from dateutil.parser import isoparse
 from django.core.management import BaseCommand
+from django.db.models import Min
 from django.utils import timezone
 
 from zh.models import JobRun, Match, MatchPlayer, Player
@@ -14,31 +16,30 @@ LOGS = []
 
 def log(message):
     message = f"[{timezone.now().isoformat()}] {message}"
-    LOGS.append(message)
     print(message)
-
-
-def update_run_status(job_run, start_time, loaded_matches):
-    job_run.duration = datetime.timedelta(seconds=int(time.time() - start_time))
-    job_run.loaded_matches = loaded_matches
-    job_run.logs.extend(LOGS)
-    job_run.save()
-    LOGS.clear()
+    return
+    LOGS.append(message)
 
 
 class GenToolClient:
     def __init__(self):
         self.base_url = "https://gentool.net/data/zh"
 
-    def _get_links(self, data, extension=None):
+    def _get_links(self, data, extension=None, minimum_timestamp=datetime.datetime.min):
         soup = BeautifulSoup(data, "html.parser")
-        return [
-            link["href"].strip("/")
-            for link in soup.find_all("a")
-            if not link.find_parent("th")
-            and not any(prefix in link["href"] for prefix in ("data", "logs"))
-            and (extension is None or link["href"].endswith(extension))
-        ]
+        results = {}
+        for link in soup.find_all("a"):
+            name = link["href"].strip("/")
+            if link.find_parent("th") or any(prefix in name for prefix in ("data", "logs")):
+                continue
+            if extension and not name.endswith(extension):
+                continue
+            row = link.find_parent("tr")
+            timestamp = isoparse(f"{row.find_all('td')[2].text.strip()}:00")  # NOQA E231
+            if timestamp is None or timestamp >= minimum_timestamp:
+                results[name] = timestamp
+
+        return dict(sorted(results.items(), key=lambda item: item[1]))  # Sort by timestamp
 
     def _parse_replay_data(self, data):
         # Initialize the dictionary to store extracted fields
@@ -51,7 +52,7 @@ class GenToolClient:
             "starting_cash": r"Start Cash:\s+(\d+)",
             "match_length": r"Match Length:\s+([\d:]+)",
             "match_type": r"Match Type:\s+(.+)",
-            "match_datetime": r"Match Date \(UTC\):\s+(.+)",
+            "match_timestamp": r"Match Date \(UTC\):\s+(.+)",
             "replay_size": r"\.rep \[(\d+) bytes\]",
         }
 
@@ -60,7 +61,7 @@ class GenToolClient:
             match = re.search(pattern, data)
             value = match.group(1) if match else None
 
-            if key == "match_datetime" and value:
+            if key == "match_timestamp" and value:
                 try:
                     value = datetime.datetime.strptime(value, "%Y %b %d, %H:%M:%S").astimezone(
                         datetime.timezone.utc
@@ -108,29 +109,33 @@ class GenToolClient:
 
         return extracted_data
 
-    def list_months(self, min_month=None):
-        log(f"Listing months from {self.base_url} with {min_month=}")
-        result = sorted(self._get_links(requests.get(f"{self.base_url}").text))
-        if min_month:
-            result = result[result.index(min_month) :]  # NOQA E203
-        return result
+    def list_months(self, minimum_timestamp=None):
+        log(f"Listing months from {self.base_url} with {minimum_timestamp=}")
+        ignored_months = (
+            "2024_04_April",
+            "2024_05_May",
+            "2024_06_June",
+            "2024_07_July",
+        )
+        return [
+            m
+            for m in list(sorted(self._get_links(requests.get(f"{self.base_url}").text).keys()))
+            if m not in ignored_months
+        ]
 
-    def list_days(self, month, min_month=None, min_day=None):
+    def list_days(self, month, minimum_timestamp=None):
         url = f"{self.base_url}/{month}"
-        log(f"Listing days from {url} with {min_month=} and {min_day=}")
-        result = sorted(self._get_links(requests.get(url).text))
-        if min_day and min_month and min_month == month:
-            result = result[result.index(min_day) :]  # NOQA E203
-        return result
+        log(f"Listing days from {url} with {minimum_timestamp=}")
+        return list(sorted(self._get_links(requests.get(url).text)))
 
-    def list_players(self, month, day):
+    def list_players(self, month, day, minimum_timestamp=None):
         url = f"{self.base_url}/{month}/{day}"
-        log(f"Listing players from {url}")
+        log(f"Listing players from {url} with {minimum_timestamp=}")
         return self._get_links(requests.get(url).text)
 
-    def list_matches(self, month, day, player):
+    def list_matches(self, month, day, player, minimum_timestamp=None):
         url = f"{self.base_url}/{month}/{day}/{player}"
-        log(f"Listing matches from {url}")
+        log(f"Listing matches from {url} with minimum_timestamp={minimum_timestamp}")
         return self._get_links(requests.get(url).text, ".txt")
 
     def get_match_data(self, month, day, player, match):
@@ -140,97 +145,124 @@ class GenToolClient:
 
 
 class Command(BaseCommand):
-    def handle(self, *args, **kwargs):
-        gentool = GenToolClient()
-        start_time = time.time()
-        loaded_matches = 0
-        previous_run = JobRun.objects.order_by("-start_time").first()
-        if previous_run:
-            min_month = previous_run.last_loaded_month
-            min_day = previous_run.last_loaded_date
-        else:
-            min_month = "2024_08_August"
-            min_day = None
+    def __init__(self):
+        self.gentool = GenToolClient()
+        self.start_time = time.time()
+        self.loaded_matches = 0
+        self.last_loaded_timestamp = None
+        self.logs = []
 
-        current_run = JobRun.objects.create(
+    def _update_run_status(self):
+        self.current_run.duration = datetime.timedelta(seconds=int(time.time() - self.start_time))
+        self.current_run.loaded_matches = self.loaded_matches
+        self.current_run.logs.extend(LOGS)
+        self.current_run.save()
+        LOGS.clear()
+
+    def _process_match(
+        self,
+        month,
+        day,
+        player_data,
+        player,
+        match_info,
+        replay_upload_timestamp,
+    ):
+        match_data = self.gentool.get_match_data(month, day, player_data, match_info)
+        match_players = match_data.pop("players")
+        replay_url = f"{self.gentool.base_url}/{month}/{day}/{player_data}/{match_info}".replace(
+            # NOQA E501
+            ".txt",
+            ".rep",
+        )
+
+        if Match.objects.filter(replay_url=replay_url).exists():
+            return
+        match = Match.objects.create(
+            job_run=self.current_run,
+            replay_url=replay_url,
+            replay_uploaded_by=player,
+            replay_upload_timestamp=replay_upload_timestamp,
+            **match_data,
+        )
+        log(f"Created match: {replay_url}")
+
+        match_player_objects = []
+        for match_player in match_players:
+            if match_player["player_name"] == player.player_name:
+                player_object = player
+            else:
+                player_object, created_object = Player.objects.get_or_create(  # NOQA E501
+                    player_name=match_player["player_name"]
+                )
+                if created_object:
+                    log(f"Created player: {match_player['player_name']}")
+            match_player_objects.append(
+                MatchPlayer(
+                    match=match,
+                    player=player_object,
+                    team=match_player["team"],
+                    army=match_player["army"],
+                )
+            )
+            log(
+                f"Adding player: {match_player['player_name']} to match: {replay_url}"  # NOQA E501
+            )
+
+        MatchPlayer.objects.bulk_create(match_player_objects)
+
+    def _process_day(self, month, day, player_data):
+        parts = player_data.split("_")
+        gentool_id = parts[-1]
+        name = "_".join(parts[:-1])
+
+        try:
+            player = Player.objects.get(gentool_id=gentool_id)
+        except Player.DoesNotExist:
+            player, created = Player.objects.get_or_create(player_name=name)
+            if created:
+                log(f"Created player: {name}")
+
+        if not player.gentool_id:
+            player.gentool_id = gentool_id
+            player.save()
+            log(f"Updated player: {name} with {gentool_id=}")
+
+        for match_info, replay_upload_timestamp in self.gentool.list_matches(
+            month, day, player_data, minimum_timestamp=self.last_loaded_timestamp
+        ).items():
+            self._process_match(
+                month, day, player_data, player, match_info, replay_upload_timestamp
+            )
+            self.loaded_matches += 1
+            self._update_run_status()
+
+    def _process_players(self, month, day):
+        for player_data in self.gentool.list_players(
+            month, day, minimum_timestamp=self.last_loaded_timestamp
+        ):
+            self._process_day(month, day, player_data)
+
+    def handle(self, *args, **kwargs):
+        self.last_loaded_timestamp = Match.objects.aggregate(Min("replay_upload_timestamp"))[
+            "replay_upload_timestamp__min"
+        ]
+
+        self.current_run = JobRun.objects.create(
             start_time=timezone.now(),
             duration=None,
             success=False,
-            last_loaded_month=min_month,
-            last_loaded_date=min_day,
         )
 
         try:
-            for month in gentool.list_months(min_month):
-                current_run.last_loaded_month = month
-                for day in gentool.list_days(month, min_month, min_day):
-                    current_run.last_loaded_date = day
-                    for player_data in gentool.list_players(month, day):
-                        parts = player_data.split("_")
-                        gentool_id = parts[-1]
-                        name = "_".join(parts[:-1])
-
-                        try:
-                            player = Player.objects.get(gentool_id=gentool_id)
-                        except Player.DoesNotExist:
-                            player, created = Player.objects.get_or_create(player_name=name)
-                            if created:
-                                log(f"Created player: {name}")
-
-                        if not player.gentool_id:
-                            player.gentool_id = gentool_id
-                            player.save()
-                            log(f"Updated player: {name} with {gentool_id=}")
-
-                        for match_info in gentool.list_matches(month, day, player_data):
-                            match_data = gentool.get_match_data(
-                                month, day, player_data, match_info
-                            )
-                            match_players = match_data.pop("players")
-                            replay_url = f"{gentool.base_url}/{month}/{day}/{player_data}/{match_info}".replace(  # NOQA E501
-                                ".txt", ".rep"
-                            )
-
-                            if Match.objects.filter(replay_url=replay_url).exists():
-                                continue
-                            match = Match.objects.create(
-                                job_run=current_run,
-                                replay_url=replay_url,
-                                **match_data,
-                                replay_uploaded_by=player,
-                            )
-                            log(f"Created match: {replay_url}")
-
-                            match_player_objects = []
-                            for match_player in match_players:
-                                if match_player["player_name"] == player.player_name:
-                                    player_object = player
-                                else:
-                                    player_object, created_object = (
-                                        Player.objects.get_or_create(  # NOQA E501
-                                            player_name=match_player["player_name"]
-                                        )
-                                    )
-                                    if created_object:
-                                        log(f"Created player: {match_player['player_name']}")
-                                match_player_objects.append(
-                                    MatchPlayer(
-                                        match=match,
-                                        player=player_object,
-                                        team=match_player["team"],
-                                        army=match_player["army"],
-                                    )
-                                )
-                                log(
-                                    f"Adding player: {match_player['player_name']} to match: {replay_url}"  # NOQA E501
-                                )
-
-                            MatchPlayer.objects.bulk_create(match_player_objects)
-                            loaded_matches += 1
-                        update_run_status(current_run, start_time, loaded_matches)
-            current_run.success = True
+            for month in self.gentool.list_months(minimum_timestamp=self.last_loaded_timestamp):
+                for day in self.gentool.list_days(
+                    month, minimum_timestamp=self.last_loaded_timestamp
+                ):
+                    self._process_players(month, day)
+            self.current_run.success = True
         except Exception as e:
-            current_run.success = False
+            self.current_run.success = False
             log(f"Error: {e}")
 
-        update_run_status(current_run, start_time, loaded_matches)
+        self._update_run_status()
