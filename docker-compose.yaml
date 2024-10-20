@@ -27,6 +27,9 @@ services:
       POSTGRES_DB: "cnc_zh_stats"
       POSTGRES_HOST_AUTH_METHOD: trust
       VIRTUAL_HOST: postgres.docker
+    volumes:
+      - ./custom-postgresql.conf:/etc/postgresql/postgresql.conf
+    command: [ "postgres", "-c", "config_file=/etc/postgresql/postgresql.conf" ]
 
   http-proxy:
     container_name: http-proxy

@@ -21,7 +21,6 @@ class BaseModel(models.Model):
 class JobRun(BaseModel):
     start_time = models.DateTimeField(default=timezone.now, db_index=True)
     duration = models.DurationField(null=True, blank=True)
-    loaded_matches = models.IntegerField(default=0)
     logs = ArrayField(models.TextField(), default=list, blank=True)
     success = models.BooleanField(default=False)
 
@@ -31,8 +30,17 @@ class JobRun(BaseModel):
     def __str__(self):
         return f"Job run at {self.start_time}"
 
+    @property
+    def loaded_match_count(self):
+        return self.matches.count()
+
+    @property
+    def loaded_player_count(self):
+        return self.players.count()
+
 
 class Player(BaseModel):
+    job_run = models.ForeignKey(to=JobRun, on_delete=models.CASCADE, related_name="players")
     player_name = models.CharField(max_length=100, db_index=True)
     gentool_id = models.CharField(max_length=32, db_index=True, null=True, blank=True)
 

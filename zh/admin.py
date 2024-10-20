@@ -43,8 +43,9 @@ class BaseModelAdmin(ModelAdmin):
 class JobRunAdmin(ReadOnlyMixin, BaseModelAdmin):
     list_display = ("id", "start_time", "duration", "success")
     list_filter = (("success", custom_titled_filter("Completed successfully")),)
-    search_fields = ("id", "last_loaded_month", "last_loaded_date")
+    search_fields = ("id",)
     date_hierarchy = "start_time"
+    readonly_fields = ("loaded_match_count", "loaded_player_count")
     fieldsets = (
         (
             None,
@@ -53,9 +54,8 @@ class JobRunAdmin(ReadOnlyMixin, BaseModelAdmin):
                     "start_time",
                     "duration",
                     "success",
-                    "loaded_matches",
-                    "last_loaded_month",
-                    "last_loaded_date",
+                    "loaded_match_count",
+                    "loaded_player_count",
                     "id",
                     "created_at",
                     "modified_at",
@@ -71,7 +71,6 @@ class JobRunAdmin(ReadOnlyMixin, BaseModelAdmin):
     )
 
     def pretty_logs(self, obj):
-        # TODO: add this to ella, instead?  (sc73903)
         formatter = HtmlFormatter(style="github-dark")
         prettified_data = highlight(
             json.dumps(obj.logs, indent=2, sort_keys=True),
@@ -84,7 +83,7 @@ class JobRunAdmin(ReadOnlyMixin, BaseModelAdmin):
 
 
 @admin.register(Player)
-class Player(ReadOnlyMixin, BaseModelAdmin):
+class PlayerAdmin(ReadOnlyMixin, BaseModelAdmin):
     list_display = ("id", "player_name", "gentool_id")
     search_fields = ("id", "player_name", "gentool_id")
 
@@ -122,5 +121,5 @@ class MatchAdmin(ReadOnlyMixin, BaseModelAdmin):
         "replay_uploaded_by__player_name",
         "players__army",
     )
-    date_hierarchy = "match_timestamp"
+    date_hierarchy = "replay_upload_timestamp"
     inlines = (MatchPlayerInline,)

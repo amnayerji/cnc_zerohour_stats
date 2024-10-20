@@ -1,12 +1,13 @@
 import datetime
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from bs4 import BeautifulSoup
 from dateutil.parser import isoparse
 from django.core.management import BaseCommand
-from django.db.models import Min
+from django.db.models import Max
 from django.utils import timezone
 
 from zh.models import JobRun, Match, MatchPlayer, Player
@@ -25,7 +26,15 @@ class GenToolClient:
     def __init__(self):
         self.base_url = "https://gentool.net/data/zh"
 
-    def _get_links(self, data, extension=None, minimum_timestamp=datetime.datetime.min):
+    def _get_links(
+        self,
+        data,
+        extension=None,
+        minimum_timestamp=None,
+    ):
+        if minimum_timestamp is None:
+            minimum_timestamp = datetime.datetime(1900, 1, 1).astimezone(datetime.timezone.utc)
+
         soup = BeautifulSoup(data, "html.parser")
         results = {}
         for link in soup.find_all("a"):
@@ -35,7 +44,9 @@ class GenToolClient:
             if extension and not name.endswith(extension):
                 continue
             row = link.find_parent("tr")
-            timestamp = isoparse(f"{row.find_all('td')[2].text.strip()}:00")  # NOQA E231
+            timestamp = isoparse(
+                f"{row.find_all('td')[2].text.strip()}:00"  # NOQA E231
+            ).astimezone(datetime.timezone.utc)
             if timestamp is None or timestamp >= minimum_timestamp:
                 results[name] = timestamp
 
@@ -111,16 +122,8 @@ class GenToolClient:
 
     def list_months(self, minimum_timestamp=None):
         log(f"Listing months from {self.base_url} with {minimum_timestamp=}")
-        ignored_months = (
-            "2024_04_April",
-            "2024_05_May",
-            "2024_06_June",
-            "2024_07_July",
-        )
         return [
-            m
-            for m in list(sorted(self._get_links(requests.get(f"{self.base_url}").text).keys()))
-            if m not in ignored_months
+            m for m in list(sorted(self._get_links(requests.get(f"{self.base_url}").text).keys()))
         ]
 
     def list_days(self, month, minimum_timestamp=None):
@@ -148,13 +151,11 @@ class Command(BaseCommand):
     def __init__(self):
         self.gentool = GenToolClient()
         self.start_time = time.time()
-        self.loaded_matches = 0
         self.last_loaded_timestamp = None
-        self.logs = []
+        self.futures = []
 
     def _update_run_status(self):
         self.current_run.duration = datetime.timedelta(seconds=int(time.time() - self.start_time))
-        self.current_run.loaded_matches = self.loaded_matches
         self.current_run.logs.extend(LOGS)
         self.current_run.save()
         LOGS.clear()
@@ -178,6 +179,7 @@ class Command(BaseCommand):
 
         if Match.objects.filter(replay_url=replay_url).exists():
             return
+
         match = Match.objects.create(
             job_run=self.current_run,
             replay_url=replay_url,
@@ -192,11 +194,13 @@ class Command(BaseCommand):
             if match_player["player_name"] == player.player_name:
                 player_object = player
             else:
-                player_object, created_object = Player.objects.get_or_create(  # NOQA E501
+                player_object = Player.objects.filter(
                     player_name=match_player["player_name"]
-                )
-                if created_object:
+                ).first()
+                if not player:
+                    player_object = Player.objects.create(player_name=match_player["player_name"])
                     log(f"Created player: {match_player['player_name']}")
+
             match_player_objects.append(
                 MatchPlayer(
                     match=match,
@@ -211,6 +215,8 @@ class Command(BaseCommand):
 
         MatchPlayer.objects.bulk_create(match_player_objects)
 
+        self._update_run_status()
+
     def _process_day(self, month, day, player_data):
         parts = player_data.split("_")
         gentool_id = parts[-1]
@@ -219,9 +225,10 @@ class Command(BaseCommand):
         try:
             player = Player.objects.get(gentool_id=gentool_id)
         except Player.DoesNotExist:
-            player, created = Player.objects.get_or_create(player_name=name)
-            if created:
-                log(f"Created player: {name}")
+            player = Player.objects.filter(player_name=name).first()
+            if not player:
+                Player.objects.create(player_name=name, gentool_id=gentool_id)
+                log(f"Created player: {name=} and {gentool_id=}")
 
         if not player.gentool_id:
             player.gentool_id = gentool_id
@@ -231,21 +238,27 @@ class Command(BaseCommand):
         for match_info, replay_upload_timestamp in self.gentool.list_matches(
             month, day, player_data, minimum_timestamp=self.last_loaded_timestamp
         ).items():
-            self._process_match(
-                month, day, player_data, player, match_info, replay_upload_timestamp
+            self.futures.append(
+                self.executor.submit(
+                    self._process_match,
+                    month,
+                    day,
+                    player_data,
+                    player,
+                    match_info,
+                    replay_upload_timestamp,
+                )
             )
-            self.loaded_matches += 1
-            self._update_run_status()
 
     def _process_players(self, month, day):
         for player_data in self.gentool.list_players(
             month, day, minimum_timestamp=self.last_loaded_timestamp
         ):
-            self._process_day(month, day, player_data)
+            self.futures.append(self.executor.submit(self._process_day, month, day, player_data))
 
     def handle(self, *args, **kwargs):
-        self.last_loaded_timestamp = Match.objects.aggregate(Min("replay_upload_timestamp"))[
-            "replay_upload_timestamp__min"
+        self.last_loaded_timestamp = Match.objects.aggregate(Max("replay_upload_timestamp"))[
+            "replay_upload_timestamp__max"
         ]
 
         self.current_run = JobRun.objects.create(
@@ -255,12 +268,24 @@ class Command(BaseCommand):
         )
 
         try:
-            for month in self.gentool.list_months(minimum_timestamp=self.last_loaded_timestamp):
-                for day in self.gentool.list_days(
-                    month, minimum_timestamp=self.last_loaded_timestamp
+            with ThreadPoolExecutor(max_workers=450) as self.executor:
+                for month in self.gentool.list_months(
+                    minimum_timestamp=self.last_loaded_timestamp
                 ):
-                    self._process_players(month, day)
-            self.current_run.success = True
+                    for day in self.gentool.list_days(
+                        month, minimum_timestamp=self.last_loaded_timestamp
+                    ):
+                        self.futures.append(
+                            self.executor.submit(self._process_players, month, day)
+                        )
+                self.current_run.success = True
+
+                for future in as_completed(self.futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        log(f"Error in processing future: {str(e)}")
+
         except Exception as e:
             self.current_run.success = False
             log(f"Error: {e}")
