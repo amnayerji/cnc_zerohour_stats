@@ -12,14 +12,18 @@ from django.utils import timezone
 
 from zh.models import JobRun, Match, MatchPlayer, Player
 
-LOGS = []
+ERRORS = []
 
 
 def log(message):
     message = f"[{timezone.now().isoformat()}] {message}"
     print(message)
-    return
-    LOGS.append(message)
+    return message
+
+
+def log_error(message):
+    message = log(f"ERROR: {message}")
+    ERRORS.append(message)
 
 
 class GenToolClient:
@@ -156,9 +160,12 @@ class Command(BaseCommand):
 
     def _update_run_status(self):
         self.current_run.duration = datetime.timedelta(seconds=int(time.time() - self.start_time))
-        self.current_run.logs.extend(LOGS)
+        self.current_run.logs = ERRORS
         self.current_run.save()
-        LOGS.clear()
+        log(
+            f"Updating job run {self.current_run} with duration={self.current_run.duration} and "
+            f"{len(ERRORS)} errors"
+        )
 
     def _process_match(
         self,
@@ -198,7 +205,9 @@ class Command(BaseCommand):
                     player_name=match_player["player_name"]
                 ).first()
                 if not player:
-                    player_object = Player.objects.create(player_name=match_player["player_name"])
+                    player_object = Player.objects.create(
+                        job_run=self.current_run, player_name=match_player["player_name"]
+                    )
                     log(f"Created player: {match_player['player_name']}")
 
             match_player_objects.append(
@@ -222,13 +231,15 @@ class Command(BaseCommand):
         gentool_id = parts[-1]
         name = "_".join(parts[:-1])
 
-        try:
-            player = Player.objects.get(gentool_id=gentool_id)
-        except Player.DoesNotExist:
+        player = Player.objects.filter(gentool_id=gentool_id).first()
+        if player is None:
             player = Player.objects.filter(player_name=name).first()
-            if not player:
-                Player.objects.create(player_name=name, gentool_id=gentool_id)
-                log(f"Created player: {name=} and {gentool_id=}")
+
+        if not player:
+            player = Player.objects.create(
+                job_run=self.current_run, player_name=name, gentool_id=gentool_id
+            )
+            log(f"Created player: {name=} and {gentool_id=}")
 
         if not player.gentool_id:
             player.gentool_id = gentool_id
@@ -267,27 +278,20 @@ class Command(BaseCommand):
             success=False,
         )
 
-        try:
-            with ThreadPoolExecutor(max_workers=450) as self.executor:
-                for month in self.gentool.list_months(
-                    minimum_timestamp=self.last_loaded_timestamp
+        with ThreadPoolExecutor(max_workers=450) as self.executor:
+            for month in self.gentool.list_months(minimum_timestamp=self.last_loaded_timestamp):
+                for day in self.gentool.list_days(
+                    month, minimum_timestamp=self.last_loaded_timestamp
                 ):
-                    for day in self.gentool.list_days(
-                        month, minimum_timestamp=self.last_loaded_timestamp
-                    ):
-                        self.futures.append(
-                            self.executor.submit(self._process_players, month, day)
-                        )
-                self.current_run.success = True
+                    self.futures.append(self.executor.submit(self._process_players, month, day))
 
-                for future in as_completed(self.futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        log(f"Error in processing future: {str(e)}")
+            self.current_run.success = True
 
-        except Exception as e:
-            self.current_run.success = False
-            log(f"Error: {e}")
+            for future in as_completed(self.futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    log_error(f"Error processing future: {e}")
 
         self._update_run_status()
+        log(f"Job completed successfully in {self.current_run.duration}")

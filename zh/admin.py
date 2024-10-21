@@ -63,7 +63,7 @@ class JobRunAdmin(ReadOnlyMixin, BaseModelAdmin):
             },
         ),
         (
-            "Logs",
+            "errors",
             {
                 "fields": ("pretty_logs",),
             },
@@ -73,7 +73,7 @@ class JobRunAdmin(ReadOnlyMixin, BaseModelAdmin):
     def pretty_logs(self, obj):
         formatter = HtmlFormatter(style="github-dark")
         prettified_data = highlight(
-            json.dumps(obj.logs, indent=2, sort_keys=True),
+            json.dumps(obj.errors, indent=2, sort_keys=True),
             JsonLexer(),
             formatter,
         )

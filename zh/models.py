@@ -21,7 +21,7 @@ class BaseModel(models.Model):
 class JobRun(BaseModel):
     start_time = models.DateTimeField(default=timezone.now, db_index=True)
     duration = models.DurationField(null=True, blank=True)
-    logs = ArrayField(models.TextField(), default=list, blank=True)
+    errors = ArrayField(models.TextField(), default=list, blank=True)
     success = models.BooleanField(default=False)
 
     class Meta:
